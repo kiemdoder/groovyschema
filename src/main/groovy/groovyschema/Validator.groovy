@@ -7,20 +7,24 @@ class Validator {
   // Takes in a `schema` and a potential `instance` of it. Validates the top
   // level constraints.
 
-  def validate(instance, schema) {
-    if (isMetaValidating) { metaValidate(schema, META_SCHEMA) }
+  def validate(instance, schema, path = '') {
+    if (isMetaValidating) {
+      metaValidate(schema, META_SCHEMA)
+    }
 
     def errors = schema.findAll(relevantProperties).collect { key, val ->
       def validator = this["validate${key.capitalize()}"]
       if (validator) {
-        def err = validator(instance, schema)
-        (err instanceof String || err instanceof GString) ? mkError(err, instance, schema) : err
+        def err = validator(instance, [*: schema, path: path])
+        (err instanceof String || err instanceof GString) ? mkError(path, err, instance, schema) : err
       } else {
         throw new IllegalArgumentException("Unknown validation attribute '${key}'")
       }
     }.findAll().flatten()
 
-    if (isMetaValidating) { metaValidate(errors, ERRORS_SCHEMA) }
+    if (isMetaValidating) {
+      metaValidate(errors, ERRORS_SCHEMA)
+    }
     errors
   }
 
@@ -29,7 +33,7 @@ class Validator {
   // conforms to all. Returns the validation error messages, if any.
 
   private validateAllOf = { instance, schema ->
-    def errors = collectValidations(instance, schema.allOf).findAll()
+    def errors = collectValidations(instance, schema.allOf, schema.path).findAll()
 
     if (errors.size() > 0) {
       "groovyschema.allOf.message"
@@ -41,7 +45,7 @@ class Validator {
   // conforms to at least one. Returns the validation error messages, if any.
 
   private validateAnyOf = { instance, schema ->
-    def errors = collectValidations(instance, schema.anyOf).findAll()
+    def errors = collectValidations(instance, schema.anyOf, schema.path).findAll()
 
     if (errors.size() == schema.anyOf.size()) {
       "groovyschema.anyOf.message"
@@ -53,7 +57,7 @@ class Validator {
   // conforms to exactly one. Returns the validation error messages, if any.
 
   private validateOneOf = { instance, schema ->
-    def errors = collectValidations(instance, schema.oneOf).findAll()
+    def errors = collectValidations(instance, schema.oneOf, schema.path).findAll()
 
     if (schema.oneOf.size() - errors.size() != 1) {
       "groovyschema.oneOf.message"
@@ -66,7 +70,7 @@ class Validator {
 
   private validateNot = { instance, schema ->
     def prohibitedSchemas = schema.not instanceof List ? schema.not : [schema.not]
-    def errors = collectValidations(instance, prohibitedSchemas).findAll()
+    def errors = collectValidations(instance, prohibitedSchemas, schema.path).findAll()
 
     if (errors.size() != prohibitedSchemas.size()) {
       "groovyschema.not.message"
@@ -86,11 +90,11 @@ class Validator {
       def dependency = instance[property]
       if (dependency != null) {
         if (description instanceof String || description instanceof List) {
-          if (! description.every { instance[it] != null }) {
-            mkError("groovyschema.dependencies.message", instance, schema)
+          if (!description.every { instance[it] != null }) {
+            mkError(schema.path, "groovyschema.dependencies.message", instance, schema)
           }
         } else {
-          this.validate(instance, description)
+          this.validate(instance, description, schema.path)
         }
       }
     }.findAll().flatten()
@@ -101,7 +105,7 @@ class Validator {
   // message, if any.
 
   private validateEnum = { instance, schema ->
-    if (! schema.enum.any { deepEqual(it, instance) } && instance != null) {
+    if (!schema.enum.any { deepEqual(it, instance) } && instance != null) {
       "groovyschema.enum.message"
     }
   }
@@ -111,7 +115,7 @@ class Validator {
   // message, if any.
 
   private validateFixed = { instance, schema ->
-    if (! deepEqual(schema.fixed, instance)) {
+    if (!deepEqual(schema.fixed, instance)) {
       "groovyschema.fixed.message"
     }
   }
@@ -121,7 +125,7 @@ class Validator {
 
   private validateUniqueItems = { instance, schema ->
     if (!(instance instanceof List)) return
-    if (! schema.uniqueItems) return
+    if (!schema.uniqueItems) return
 
     def uniqued = instance.unique(false, { a, b -> deepEqual(a, b) ? 0 : 1 })
 
@@ -143,7 +147,7 @@ class Validator {
     def items = instance
     if (schema.items instanceof Map) {
       def itemSchema = schema.items
-      items.collect { item -> this.validate(item, itemSchema) }.findAll().flatten()
+      items.collect { item -> this.validate(item, [*: itemSchema, path: schema.path]) }.findAll().flatten()
     } else if (items.size() > schema.items.size() && !schema.additionalItems) {
       "groovyschema.additionalItems.message"
     } else {
@@ -151,7 +155,7 @@ class Validator {
       [schemas, items].transpose().collect {
         def itemSchema = it[0]
         def item = it[1]
-        this.validate(item, itemSchema)
+        this.validate(item, [*: itemSchema, path: schema.path])
       }
     }
   }
@@ -167,7 +171,7 @@ class Validator {
     instance.collect { property, propertyValue ->
       schema.patternProperties.collect { pattern, propertySchema ->
         if (property ==~ pattern) {
-          this.validate(propertyValue, propertySchema)
+          this.validate(propertyValue, propertySchema, "${schema.path}/$property")
         }
       }.findAll().flatten()
     }.findAll().flatten()
@@ -192,7 +196,7 @@ class Validator {
       def additional = given - possible
 
       if (additional.size() != 0) {
-       "groovyschema.additionalProperties.message"
+        "groovyschema.additionalProperties.message"
       }
     } else {
       def additionalPropertySchema = schema.additionalProperties
@@ -200,7 +204,7 @@ class Validator {
       def additional = given - possible
 
       additional.collect { property ->
-        this.validate(instance[property], additionalPropertySchema)
+        this.validate(instance[property], additionalPropertySchema, "${schema.path}/$property")
       }.findAll().flatten()
     }
   }
@@ -213,7 +217,7 @@ class Validator {
     if (!(instance instanceof Map)) return
 
     schema.properties.collect { property, propertySchema ->
-      this.validate(instance[property], propertySchema)
+      this.validate(instance[property], propertySchema, "${schema.path}/$property")
     }.findAll().flatten()
   }
 
@@ -357,26 +361,26 @@ class Validator {
 
     def valid = false
     switch (schema.type) {
-    case 'string':
-      valid = instance instanceof String; break
-    case 'number':
-      valid = instance instanceof Number; break
-    case 'integer':
-      valid = instance instanceof Integer; break
-    case 'boolean':
-      valid = instance instanceof Boolean; break
-    case 'array':
-      valid = instance instanceof List; break
-    case 'null':
-      valid = instance == null; break
-    case 'any':
-      valid = true; break
-    case 'object':
-      valid = instance instanceof Map; break
-    default:
-      throw new IllegalArgumentException("Value for validation attribute 'type' is not supported")
+      case 'string':
+        valid = instance instanceof String || instance instanceof GString; break
+      case 'number':
+        valid = instance instanceof Number; break
+      case 'integer':
+        valid = instance instanceof Integer; break
+      case 'boolean':
+        valid = instance instanceof Boolean; break
+      case 'array':
+        valid = instance instanceof List; break
+      case 'null':
+        valid = instance == null; break
+      case 'any':
+        valid = true; break
+      case 'object':
+        valid = instance instanceof Map; break
+      default:
+        throw new IllegalArgumentException("Value for validation attribute 'type' is not supported")
     }
-    if (! valid) {
+    if (!valid) {
       "groovyschema.type.message"
     }
   }
@@ -384,12 +388,14 @@ class Validator {
   // When `message` is truthy, builds and returns an error object from the
   // passed-in parameters.
 
-  private mkError(message, instance, schema) {
+  private static mkError(path, message, instance, schema) {
+    schema.remove('path')
     if (message) {
       [
-        instance: instance,
-        schema: schema,
-        message: message.toString(),
+          path    : path,
+          instance: instance,
+          schema  : schema,
+          message : message.toString(),
       ]
     }
   }
@@ -397,26 +403,26 @@ class Validator {
   // Takes an instance and a list of schemas. Validates the instance against all
   // of them and returns a list of return values.
 
-  private collectValidations(instance, schemas) {
-    schemas.collect { this.validate(instance, it) }
+  private collectValidations(instance, schemas, path) {
+    schemas.collect { this.validate(instance, [*: it, path: path]) }
   }
 
   // Regular expressions used with the `format` validation attribute.
 
   private final formats = [
-    'date-time': /^\d{4}-(?:0[0-9]{1}|1[0-2]{1})-[0-9]{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/,
-    'email': /^(?:[\w\!\#\$\%\&\'\*\+\-\/\=\?\^\`\{\|\}\~]+\.)*[\w\!\#\$\%\&\'\*\+\-\/\=\?\^\`\{\|\}\~]+@(?:(?:(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-](?!\.)){0,61}[a-zA-Z0-9]?\.)+[a-zA-Z0-9](?:[a-zA-Z0-9\-](?!$)){0,61}[a-zA-Z0-9]?)|(?:\[(?:(?:[01]?\d{1,2}|2[0-4]\d|25[0-5])\.){3}(?:[01]?\d{1,2}|2[0-4]\d|25[0-5])\]))$/,
-    'hostname': /^(([a-zA-Z]|[a-zA-Z][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)*([A-Za-z]|[A-Za-z][A-Za-z0-9\-]*[A-Za-z0-9])$/,
-    'ipv4': /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/,
-    'ipv6': /^\s*((([0-9A-Fa-f]{1,4}:){7}([0-9A-Fa-f]{1,4}|:))|(([0-9A-Fa-f]{1,4}:){6}(:[0-9A-Fa-f]{1,4}|((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|:))|(([0-9A-Fa-f]{1,4}:){5}(((:[0-9A-Fa-f]{1,4}){1,2})|:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|:))|(([0-9A-Fa-f]{1,4}:){4}(((:[0-9A-Fa-f]{1,4}){1,3})|((:[0-9A-Fa-f]{1,4})?:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){3}(((:[0-9A-Fa-f]{1,4}){1,4})|((:[0-9A-Fa-f]{1,4}){0,2}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){2}(((:[0-9A-Fa-f]{1,4}){1,5})|((:[0-9A-Fa-f]{1,4}){0,3}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){1}(((:[0-9A-Fa-f]{1,4}){1,6})|((:[0-9A-Fa-f]{1,4}){0,4}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(:(((:[0-9A-Fa-f]{1,4}){1,7})|((:[0-9A-Fa-f]{1,4}){0,5}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:)))(%.+)?\s*$/,
-    'uri': /^[a-zA-Z][a-zA-Z0-9+-.]*:[^\s]*$/,
+      'date-time': /^\d{4}-(?:0[0-9]{1}|1[0-2]{1})-[0-9]{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/,
+      'email'    : /^(?:[\w\!\#\$\%\&\'\*\+\-\/\=\?\^\`\{\|\}\~]+\.)*[\w\!\#\$\%\&\'\*\+\-\/\=\?\^\`\{\|\}\~]+@(?:(?:(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-](?!\.)){0,61}[a-zA-Z0-9]?\.)+[a-zA-Z0-9](?:[a-zA-Z0-9\-](?!$)){0,61}[a-zA-Z0-9]?)|(?:\[(?:(?:[01]?\d{1,2}|2[0-4]\d|25[0-5])\.){3}(?:[01]?\d{1,2}|2[0-4]\d|25[0-5])\]))$/,
+      'hostname' : /^(([a-zA-Z]|[a-zA-Z][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)*([A-Za-z]|[A-Za-z][A-Za-z0-9\-]*[A-Za-z0-9])$/,
+      'ipv4'     : /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/,
+      'ipv6'     : /^\s*((([0-9A-Fa-f]{1,4}:){7}([0-9A-Fa-f]{1,4}|:))|(([0-9A-Fa-f]{1,4}:){6}(:[0-9A-Fa-f]{1,4}|((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|:))|(([0-9A-Fa-f]{1,4}:){5}(((:[0-9A-Fa-f]{1,4}){1,2})|:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|:))|(([0-9A-Fa-f]{1,4}:){4}(((:[0-9A-Fa-f]{1,4}){1,3})|((:[0-9A-Fa-f]{1,4})?:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){3}(((:[0-9A-Fa-f]{1,4}){1,4})|((:[0-9A-Fa-f]{1,4}){0,2}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){2}(((:[0-9A-Fa-f]{1,4}){1,5})|((:[0-9A-Fa-f]{1,4}){0,3}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){1}(((:[0-9A-Fa-f]{1,4}){1,6})|((:[0-9A-Fa-f]{1,4}){0,4}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(:(((:[0-9A-Fa-f]{1,4}){1,7})|((:[0-9A-Fa-f]{1,4}){0,5}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:)))(%.+)?\s*$/,
+      'uri'      : /^[a-zA-Z][a-zA-Z0-9+-.]*:[^\s]*$/,
   ]
 
   // Filter function that excludes irrelevant properties when scanning for
   // validation properties.
 
   private final relevantProperties = { key, val ->
-    !(key in ['exclusiveMinimum', 'exclusiveMaximum', 'additionalItems'])
+    !(key in ['exclusiveMinimum', 'exclusiveMaximum', 'additionalItems', 'path', 'doc'])
   }
 
   // Takes to parameters and deeply compares them.
@@ -444,8 +450,8 @@ class Validator {
     }
   }
 
-  private metaValidate(schemaInstance, metaSchema) {
-    def metaValidator = new Validator(isMetaValidating:false)
+  private static metaValidate(schemaInstance, metaSchema) {
+    def metaValidator = new Validator(isMetaValidating: false)
     def metaErrors = metaValidator.validate(schemaInstance, metaSchema)
     if (metaErrors.size()) {
       throw new IllegalArgumentException("schema instance does not comply to meta-schema")
@@ -453,139 +459,144 @@ class Validator {
   }
 
   static final ERRORS_SCHEMA = [
-    type: 'array',
-    minItems: 0,
-    required: true,
-    items: [
-      type: 'object',
+      type    : 'array',
+      minItems: 0,
       required: true,
-      additionalProperties: false,
-      properties: [
-        instance: [type:'any'], // the validated (sub-)instance e.g. "abc"
-        schema: [type:'object', required:true], // the associated (sub-)schema e.g. [format:'email']
-        message: [
-          type: 'string',
-          required: true,
-          enum: [
-            "groovyschema.additionalItems.message",
-            "groovyschema.additionalProperties.message",
-            "groovyschema.allOf.message",
-            "groovyschema.anyOf.message",
-            "groovyschema.dependencies.message",
-            "groovyschema.divisibleBy.message",
-            "groovyschema.enum.message",
-            "groovyschema.fixed.message",
-            "groovyschema.format.message",
-            "groovyschema.maxItems.message",
-            "groovyschema.maxLength.message",
-            "groovyschema.maximum.message",
-            "groovyschema.minItems.message",
-            "groovyschema.minLength.message",
-            "groovyschema.minimum.message",
-            "groovyschema.not.message",
-            "groovyschema.oneOf.message",
-            "groovyschema.pattern.message",
-            "groovyschema.required.message",
-            "groovyschema.type.message",
-            "groovyschema.uniqueItems.message"
+      items   : [
+          type                : 'object',
+          required            : true,
+          additionalProperties: false,
+          properties          : [
+              path    : [type: 'string'], // path to the property where the error was detected
+              instance: [type: 'any'], // the validated (sub-)instance e.g. "abc"
+              schema  : [type: 'object', required: true], // the associated (sub-)schema e.g. [format:'email']
+              message : [
+                  type    : 'string',
+                  required: true,
+                  enum    : [
+                      "groovyschema.additionalItems.message",
+                      "groovyschema.additionalProperties.message",
+                      "groovyschema.allOf.message",
+                      "groovyschema.anyOf.message",
+                      "groovyschema.dependencies.message",
+                      "groovyschema.divisibleBy.message",
+                      "groovyschema.enum.message",
+                      "groovyschema.fixed.message",
+                      "groovyschema.format.message",
+                      "groovyschema.maxItems.message",
+                      "groovyschema.maxLength.message",
+                      "groovyschema.maximum.message",
+                      "groovyschema.minItems.message",
+                      "groovyschema.minLength.message",
+                      "groovyschema.minimum.message",
+                      "groovyschema.not.message",
+                      "groovyschema.oneOf.message",
+                      "groovyschema.pattern.message",
+                      "groovyschema.required.message",
+                      "groovyschema.type.message",
+                      "groovyschema.uniqueItems.message"
+                  ]
+              ]
           ]
-        ]
       ]
-    ]
   ]
 
   static final META_SCHEMA = [
-    type: 'object',
-    required: true,
-    additionalProperties: false,
-    properties: [
+      type                : 'object',
+      required            : true,
+      additionalProperties: false,
+      properties          : [
 
-      required: [type:'boolean'],
+          required            : [type: 'boolean'],
 
-      type: [type:'string', enum:['string', 'number', 'integer', 'boolean', 'array', 'null', 'any', 'object']],
+          type                : [type: 'string', enum: ['string', 'number', 'integer', 'boolean', 'array', 'null', 'any', 'object']],
 
-      enum: [type:'array', minItems:1, items:[type:'any']],
+          enum                : [type: 'array', minItems: 1, items: [type: 'any']],
 
-      fixed: [type:'any'],
+          fixed               : [type: 'any'],
 
-      pattern: [type:'string'],
+          pattern             : [type: 'string'],
 
-      format: [type:'string', enum:['date-time', 'email', 'hostname', 'ipv4', 'ipv6', 'uri']],
+          format              : [type: 'string', enum: ['date-time', 'email', 'hostname', 'ipv4', 'ipv6', 'uri']],
 
-      minLength: [type:'number', minimum:0],
+          minLength           : [type: 'number', minimum: 0],
 
-      maxLength: [type:'number', minimum:0],
+          maxLength           : [type: 'number', minimum: 0],
 
-      minimum: [type:'number'],
+          minimum             : [type: 'number'],
 
-      maximum: [type:'number'],
+          maximum             : [type: 'number'],
 
-      divisibleBy: [type:'number', minimum:0, exclusiveMinimum:true],
+          divisibleBy         : [type: 'number', minimum: 0, exclusiveMinimum: true],
 
-      properties: [
-        type: 'object',
-        patternProperties: [
-          /.+/: [type:'object'] // in fact, all values of the `properties` object should comply to this metaschema.
-        ]
-      ],
+          properties          : [
+              type             : 'object',
+              patternProperties: [
+                  /.+/: [type: 'object'] // in fact, all values of the `properties` object should comply to this metaschema.
+              ]
+          ],
 
-      additionalProperties: [
-        anyOf: [
-          [type:'boolean'],
-          [type:'null'],
-          [type:'string'],
-          [type:'array', items:[type:'string']],
-          [type:'object'] // in fact, the schema for all additional properties
-        ]
-      ],
+          additionalProperties: [
+              anyOf: [
+                  [type: 'boolean'],
+                  [type: 'null'],
+                  [type: 'string'],
+                  [type: 'array', items: [type: 'string']],
+                  [type: 'object'] // in fact, the schema for all additional properties
+              ]
+          ],
 
-      patternProperties: [
-        type: 'object',
-        patternProperties: [
-          /.+/: [type:'object'] // in fact, all values of the `patternProperties` object should comply to this metaschema.
-        ]
-      ],
+          patternProperties   : [
+              type             : 'object',
+              patternProperties: [
+                  /.+/: [type: 'object'] // in fact, all values of the `patternProperties` object should comply to this metaschema.
+              ]
+          ],
 
-      dependencies: [
-        type: 'object',
-        patternProperties: [
-          /.+/: [
-            anyOf: [
-              [type:'string'],
-              [type:'array', minItems:1, items:[type:'string']],
-              [type:'object'] // in fact, the schema for the dependency
-            ]
-          ]
-        ]
-      ],
+          dependencies        : [
+              type             : 'object',
+              patternProperties: [
+                  /.+/: [
+                      anyOf: [
+                          [type: 'string'],
+                          [type: 'array', minItems: 1, items: [type: 'string']],
+                          [type: 'object'] // in fact, the schema for the dependency
+                      ]
+                  ]
+              ]
+          ],
 
-      items: [
-        anyOf: [
-          [type:'object'], // in fact, the schema for all items
-          [type:'array', items:[type:'object']], // in fact, schemas for each item in the list
-        ]
-      ],
+          items               : [
+              anyOf: [
+                  [type: 'object'], // in fact, the schema for all items
+                  [type: 'array', items: [type: 'object']], // in fact, schemas for each item in the list
+              ]
+          ],
 
-      additionalItems: [type:'boolean'],
+          additionalItems     : [type: 'boolean'],
 
-      exclusiveMinimum: [type:'boolean'],
+          exclusiveMinimum    : [type: 'boolean'],
 
-      exclusiveMaximum: [type:'boolean'],
+          exclusiveMaximum    : [type: 'boolean'],
 
-      minItems: [type:'number', minimum:0],
+          minItems            : [type: 'number', minimum: 0],
 
-      maxItems: [type:'number', minimum:0],
+          maxItems            : [type: 'number', minimum: 0],
 
-      uniqueItems: [type:'boolean'],
+          uniqueItems         : [type: 'boolean'],
 
-      allOf: [type:'array', items:[type:'object']], // in fact, an array of schemas
+          allOf               : [type: 'array', items: [type: 'object']], // in fact, an array of schemas
 
-      anyOf: [type:'array', items:[type:'object']], // in fact, an array of schemas
+          anyOf               : [type: 'array', items: [type: 'object']], // in fact, an array of schemas
 
-      oneOf: [type:'array', items:[type:'object']], // in fact, an array of schemas
+          oneOf               : [type: 'array', items: [type: 'object']], // in fact, an array of schemas
 
-      not: [type:'array', items:[type:'object']], // in fact, an array of schemas
-    ]
+          not                 : [type: 'array', items: [type: 'object']], // in fact, an array of schemas
+
+          path                : [type: 'string'],
+
+          doc                 : [type: 'string'], // documentation
+      ]
   ]
 
 }
