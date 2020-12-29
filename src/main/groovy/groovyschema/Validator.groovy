@@ -593,9 +593,9 @@ class Validator {
 
           not                 : [type: 'array', items: [type: 'object']], // in fact, an array of schemas
 
-          path                : [type: 'string'],
+          path                : [type: 'string'], // Used internally only
 
-          doc                 : [type: 'string'], // documentation
+          doc                 : [type: 'string'], // Additional documentation string for this item
       ]
   ]
 

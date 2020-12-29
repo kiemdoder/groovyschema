@@ -14,7 +14,7 @@ install {
   repositories {
     mavenInstaller { 
       pom {
-        groupId = 'ca.code3'
+        groupId = 'kiemdoder'
         artifactId = 'groovyschema'
         version = '0.1-SNAPSHOT'
       }
